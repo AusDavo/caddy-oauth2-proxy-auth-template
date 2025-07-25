@@ -1,0 +1,89 @@
+# Core Auth Snippets
+
+(auth_error_handler) {
+	handle_errors {
+		@unauthenticated expression `{http.error.status_code} == 401`
+		redir @unauthenticated https://{oauth_proxy_host}/oauth2/sign_in?rd=https://{host}{uri} 302
+		respond "Service is currently unavailable. Please try again later." 503
+	}
+}
+
+(auth_cookie_check) {
+	@noauth not header Cookie *_oauth2_proxy=*
+	redir @noauth https://{oauth_proxy_host}/oauth2/sign_in?rd=https://{host}{uri} 302
+}
+
+(auth_forward) {
+	forward_auth {oauth_proxy_host:port} {
+		uri /oauth2/auth
+		copy_headers X-Auth-Request-Groups
+		header_up X-Auth-Request-Redirect https://{host}{uri}
+	}
+}
+
+(auth_group_check) {
+	@no_groups not header X-Auth-Request-Groups *
+	respond @no_groups "Access denied: No group membership found." 403
+	@allowed header_regexp X-Auth-Request-Groups (?i)\b{args[0]}\b
+}
+
+(auth_deny_response) {
+	respond "Access denied: You must be in the '{args[0]}' group." 403
+}
+
+(simple_error_handler) {
+	handle_errors {
+		respond "Something went wrong." 500
+	}
+}
+
+# OAuth2 Proxy Itself (Unauthenticated, as it's the auth entrypoint)
+{oauth_proxy_domain} {
+	reverse_proxy {oauth_proxy_internal_url}  # e.g., http://localhost:4180
+	import simple_error_handler
+}
+
+# Example: Protected Site for "infra" Group
+infra-example.{your_domain} {
+	import auth_error_handler
+	import auth_cookie_check
+	import auth_forward
+	import auth_group_check infra
+	handle @allowed {
+		reverse_proxy {protected_service_url}  # e.g., https://internal-service:8006
+	}
+	import auth_deny_response infra
+	import simple_error_handler
+}
+
+# Example: Protected Site for "all_team" Group
+team-example.{your_domain} {
+	import auth_error_handler
+	import auth_cookie_check
+	import auth_forward
+	import auth_group_check all_team
+	handle @allowed {
+		reverse_proxy {protected_service_url}  # e.g., http://internal-service:9182
+	}
+	import auth_deny_response all_team
+	import simple_error_handler
+}
+
+# Example: Protected Site with Custom Path Handling (e.g., Public FAQ with Auth Fallback)
+special-example.{your_domain} {
+	import auth_error_handler
+	route {
+		@public_path path /public/api/path  # Adjust to your public paths
+		handle @public_path {
+			reverse_proxy {public_service_url}  # Allow unauth access to specific paths
+		}
+		import auth_cookie_check
+		import auth_forward
+		import auth_group_check restricted_group
+		handle @allowed {
+			reverse_proxy {protected_service_url}
+		}
+		import auth_deny_response restricted_group
+	}
+	import simple_error_handler
+}
